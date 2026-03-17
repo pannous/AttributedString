@@ -290,68 +290,56 @@ fileprivate extension UILabel {
         var origins = [CGPoint](repeating: .zero, count: visibleCount)
         CTFrameGetLineOrigins(ctFrame, CFRange(location: 0, length: visibleCount), &origins)
 
-        // Build visible lines array, with truncation on last line if needed
-        var visibleLines = Array(lines.prefix(visibleCount))
-        if numberOfLines > 0 && lines.count > numberOfLines {
-            // Create truncated last line with ellipsis to match UILabel's rendering
-            let lastLine = visibleLines[visibleCount - 1]
-            let lastCharRange = CTLineGetStringRange(lastLine)
-            var truncAttrs: [NSAttributedString.Key: Any] = [:]
-            if lastCharRange.length > 0 {
-                truncAttrs = attributedText.attributes(at: lastCharRange.location, effectiveRange: nil)
-            }
-            let token = NSAttributedString(string: "\u{2026}", attributes: truncAttrs)
-            let tokenLine = CTLineCreateWithAttributedString(token as CFAttributedString)
-            if let truncated = CTLineCreateTruncatedLine(lastLine, Double(textRect.width), .end, tokenLine) {
-                visibleLines[visibleCount - 1] = truncated
-            }
-        }
-
         // Debug overlay — draw CoreText lines on top of UILabel for visual comparison
         subviews.filter({ $0 is DebugView }).forEach({ $0.removeFromSuperview() })
         let debugView = DebugView(frame: textRect)
-        debugView.draw = { [visibleLines, origins, height = textRect.height] in
+        debugView.draw = { [lines = Array(lines.prefix(visibleCount)), origins, height = textRect.height] in
             guard let ctx = UIGraphicsGetCurrentContext() else { return }
             ctx.saveGState()
-            // Flip to CoreText coordinate system (origin at bottom-left)
             ctx.translateBy(x: 0, y: height)
             ctx.scaleBy(x: 1, y: -1)
-            for i in 0..<visibleLines.count {
+            for i in 0..<lines.count {
                 ctx.textPosition = origins[i]
-                CTLineDraw(visibleLines[i], ctx)
+                CTLineDraw(lines[i], ctx)
             }
             ctx.restoreGState()
         }
         addSubview(debugView)
 
-        // Convert tap point from UIKit (top-left origin) to CoreText (bottom-left origin) relative to textRect
+        // Convert tap point from UIKit coordinates (top-left origin) to CoreText coordinates (bottom-left origin)
         let ctX = point.x - textRect.origin.x
         let ctY = textRect.height - (point.y - textRect.origin.y)
 
-        // Find the tapped line and character index
+        // Find the tapped line using vertical midpoints to split inter-line space evenly between neighbors
+        var tappedLineIndex: Int?
         for i in 0..<visibleCount {
-            var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
-            let lineWidth = CGFloat(CTLineGetTypographicBounds(lines[i], &ascent, &descent, &leading))
-
-            // Check vertical bounds (line occupies: origin.y - descent .. origin.y + ascent)
-            guard ctY >= origins[i].y - descent, ctY <= origins[i].y + ascent else { continue }
-            // Check horizontal bounds
-            guard ctX >= 0, ctX <= lineWidth else { continue }
-
-            // Get string index at tap position
-            let index = CTLineGetStringIndexForPosition(lines[i], CGPoint(x: ctX, y: 0))
-            guard index >= 0, index < attributedText.length else { continue }
-
-            // Find matching action range
-            guard
-                let range = actions.keys.first(where: { $0.contains(index) }),
-                let action = actions[range] else {
-                return nil
+            let topBound: CGFloat = (i == 0) ? textRect.height : (origins[i - 1].y + origins[i].y) / 2
+            let bottomBound: CGFloat = (i == visibleCount - 1) ? 0 : (origins[i].y + origins[i + 1].y) / 2
+            if ctY <= topBound && ctY >= bottomBound {
+                tappedLineIndex = i
+                break
             }
-            return (range, action)
         }
+        guard let lineIndex = tappedLineIndex else { return nil }
+        let line = lines[lineIndex]
 
-        return nil
+        // Check horizontal bounds — account for text alignment offset
+        var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
+        let lineWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let lineOriginX = origins[lineIndex].x
+        guard ctX >= lineOriginX, ctX <= lineOriginX + lineWidth else { return nil }
+
+        // Get string index at tap position (x relative to line origin)
+        let index = CTLineGetStringIndexForPosition(line, CGPoint(x: ctX - lineOriginX, y: 0))
+        guard index >= 0, index < attributedText.length else { return nil }
+
+        // Find matching action range
+        guard
+            let range = actions.keys.first(where: { $0.contains(index) }),
+            let action = actions[range] else {
+            return nil
+        }
+        return (range, action)
     }
 }
 
